@@ -37,6 +37,7 @@ VERSION_API = "https://civitai.com/api/v1/model-versions/{version_id}"
 DOWNLOAD_CHUNK = 8 * 1024 * 1024  # 8 MiB
 MANIFEST_PATH = "manifest.json"
 SKIPLIST_PATH = "skiplist.json"
+BACKFILL_STATE_PATH = "backfill_state.json"
 
 
 def civitai_headers():
@@ -166,6 +167,27 @@ def load_skiplist(api, repo_id):
             return set(json.load(fh).get("failed_version_ids", []))
     except (EntryNotFoundError, FileNotFoundError):
         return set()
+
+
+def load_backfill_ceiling(api, repo_id):
+    """The upper bound of the next backfill date window (descending). None if uninitialized."""
+    try:
+        path = api.hf_hub_download(repo_id=repo_id, filename=BACKFILL_STATE_PATH, repo_type="model")
+        with open(path) as fh:
+            return parse_dt(json.load(fh).get("ceiling"))
+    except (EntryNotFoundError, FileNotFoundError):
+        return None
+
+
+def save_backfill_ceiling(api, repo_id, ceiling):
+    payload = json.dumps({"ceiling": ceiling.isoformat()}, indent=2).encode()
+    api.upload_file(
+        path_or_fileobj=payload,
+        path_in_repo=BACKFILL_STATE_PATH,
+        repo_id=repo_id,
+        repo_type="model",
+        commit_message=f"Backfill ceiling -> {ceiling:%Y-%m-%d}",
+    )
 
 
 def save_skiplist(api, repo_id, failed_ids):
