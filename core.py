@@ -3,10 +3,31 @@ import json
 import os
 import shutil
 import tempfile
+import time
 
 import requests
 from huggingface_hub import HfApi
 from huggingface_hub.utils import EntryNotFoundError
+
+RETRY_STATUS = {500, 502, 503, 504, 520, 522, 524}
+
+
+def civitai_get(url, params=None, stream=False, timeout=60, attempts=5):
+    """GET against Civitai with retry/backoff on transient errors (5xx, timeouts)."""
+    last = None
+    for i in range(attempts):
+        try:
+            r = requests.get(url, headers=civitai_headers(), params=params, stream=stream, timeout=timeout)
+            if r.status_code in RETRY_STATUS:
+                last = requests.HTTPError(f"{r.status_code} from Civitai", response=r)
+                r.close()
+            else:
+                r.raise_for_status()
+                return r
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last = e
+        time.sleep(min(2 ** i, 30))
+    raise last
 
 CIVITAI_API_KEY = os.environ.get("CIVITAI_API_KEY", "")
 
@@ -24,11 +45,7 @@ def civitai_headers():
 
 
 def fetch_version_metadata(version_id):
-    r = requests.get(
-        VERSION_API.format(version_id=version_id), headers=civitai_headers(), timeout=30
-    )
-    r.raise_for_status()
-    return r.json()
+    return civitai_get(VERSION_API.format(version_id=version_id), timeout=30).json()
 
 
 def pick_primary_file(version):
@@ -57,9 +74,7 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=50):
         }
         if cursor:
             params["cursor"] = cursor
-        r = requests.get(MODELS_API, headers=civitai_headers(), params=params, timeout=60)
-        r.raise_for_status()
-        data = r.json()
+        data = civitai_get(MODELS_API, params=params, timeout=60).json()
         items = data.get("items", [])
         if not items:
             return
@@ -74,8 +89,8 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=50):
 
 
 def stream_download(url, dest_path, on_progress=None, expected_bytes=0):
-    with requests.get(url, headers=civitai_headers(), stream=True, timeout=120) as r:
-        r.raise_for_status()
+    r = civitai_get(url, stream=True, timeout=120)
+    try:
         downloaded = 0
         with open(dest_path, "wb") as fh:
             for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK):
@@ -85,6 +100,8 @@ def stream_download(url, dest_path, on_progress=None, expected_bytes=0):
                 downloaded += len(chunk)
                 if on_progress and expected_bytes:
                     on_progress(min(downloaded / expected_bytes, 1.0), downloaded)
+    finally:
+        r.close()
     return downloaded
 
 
