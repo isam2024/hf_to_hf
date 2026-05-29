@@ -36,6 +36,7 @@ MODELS_API = "https://civitai.com/api/v1/models"
 VERSION_API = "https://civitai.com/api/v1/model-versions/{version_id}"
 DOWNLOAD_CHUNK = 8 * 1024 * 1024  # 8 MiB
 MANIFEST_PATH = "manifest.json"
+SKIPLIST_PATH = "skiplist.json"
 
 
 def civitai_headers():
@@ -71,12 +72,13 @@ def parse_dt(s):
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_after=None):
+def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_after=None, verbose=False):
     """Yield (model, version) pairs for LoRAs matching any of the given base models.
 
     Pages through Civitai newest-first using cursor pagination. If published_after
     (an aware datetime) is given, only versions published at/after it are yielded,
     and paging stops once the cursor timestamp falls before the cutoff (incremental mode).
+    When verbose, prints a heartbeat per page so pure pagination doesn't look frozen.
     """
     cursor = None
     pages = 0
@@ -104,6 +106,9 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
                 yield model, version
         cursor = data.get("metadata", {}).get("nextCursor")
         pages += 1
+        if verbose:
+            edge = cursor.split("|", 1)[0] if cursor else "end"
+            print(f"  ...scanned catalog page {pages} (cursor {edge})", flush=True)
         if not cursor:
             return
         # Incremental early-stop: the cursor's leading timestamp is the sort boundary.
@@ -151,6 +156,29 @@ def load_manifest(api, repo_id):
             return set(json.load(fh).get("archived_version_ids", []))
     except (EntryNotFoundError, FileNotFoundError):
         return set()
+
+
+def load_skiplist(api, repo_id):
+    """Version IDs that returned permanent download errors (401/403/404) — never retry."""
+    try:
+        path = api.hf_hub_download(repo_id=repo_id, filename=SKIPLIST_PATH, repo_type="model")
+        with open(path) as fh:
+            return set(json.load(fh).get("failed_version_ids", []))
+    except (EntryNotFoundError, FileNotFoundError):
+        return set()
+
+
+def save_skiplist(api, repo_id, failed_ids):
+    payload = json.dumps(
+        {"failed_version_ids": sorted(failed_ids, key=lambda x: int(x))}, indent=2
+    ).encode()
+    api.upload_file(
+        path_or_fileobj=payload,
+        path_in_repo=SKIPLIST_PATH,
+        repo_id=repo_id,
+        repo_type="model",
+        commit_message=f"Update skiplist ({len(failed_ids)} permanent failures)",
+    )
 
 
 def save_manifest(api, repo_id, archived_ids):

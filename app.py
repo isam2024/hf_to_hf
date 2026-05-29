@@ -82,7 +82,7 @@ def _breakdown():
     per_bm = defaultdict(lambda: [0, 0])
     for s in info.siblings:
         name = s.rfilename
-        if name in ("manifest.json", ".gitattributes") or name.endswith(".md"):
+        if name in ("manifest.json", "skiplist.json", ".gitattributes") or name.endswith(".md"):
             continue
         bm = _base_model_of(name)
         per_bm[bm][0] += 1

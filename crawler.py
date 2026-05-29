@@ -18,10 +18,14 @@ from core import (
     MANIFEST_PATH,
     iter_lora_versions,
     load_manifest,
+    load_skiplist,
     pick_primary_file,
+    save_skiplist,
     stage_download,
     upload_folder_with_retry,
 )
+
+PERMANENT_HTTP = {401, 403, 404}  # download errors that won't fix themselves -> skiplist
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
@@ -58,11 +62,13 @@ def main():
     api = HfApi(token=HF_TOKEN)
     api.create_repo(repo_id=ARCHIVE_REPO, repo_type="model", exist_ok=True)
     archived = load_manifest(api, ARCHIVE_REPO)
-    print(f"Manifest: {len(archived)} versions already archived")
+    skiplist = load_skiplist(api, ARCHIVE_REPO)
+    print(f"Manifest: {len(archived)} archived  |  skiplist: {len(skiplist)} permanent failures")
 
     staging = tempfile.mkdtemp(prefix="civitai_batch_")
     new_count = 0
     skipped_size = 0
+    skiplist_dirty = False
     batch_files = 0
     batch_bytes = 0
     batch_idx = 0
@@ -84,9 +90,11 @@ def main():
         batch_bytes = 0
 
     try:
-        for model, version in iter_lora_versions(base_set, published_after=published_after):
+        for model, version in iter_lora_versions(
+            base_set, published_after=published_after, verbose=True
+        ):
             vid = str(version.get("id"))
-            if vid in archived:
+            if vid in archived or vid in skiplist:
                 continue
             if MAX_FILES_PER_RUN > 0 and new_count >= MAX_FILES_PER_RUN:
                 print(f"Hit per-run cap ({MAX_FILES_PER_RUN}); rest picked up next run.")
@@ -104,7 +112,13 @@ def main():
             try:
                 result = stage_download(staging, model, version)
             except Exception as e:
-                print(f"  FAIL {model.get('name')} v{vid}: {e}", file=sys.stderr)
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in PERMANENT_HTTP:
+                    skiplist.add(vid)
+                    skiplist_dirty = True
+                    print(f"  SKIP (HTTP {status}, won't retry): {model.get('name')} v{vid}")
+                else:
+                    print(f"  FAIL {model.get('name')} v{vid}: {e}", file=sys.stderr)
                 continue
             if not result:
                 continue
@@ -122,6 +136,9 @@ def main():
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+    if skiplist_dirty:
+        save_skiplist(api, ARCHIVE_REPO, skiplist)
+        print(f"Skiplist updated: {len(skiplist)} permanent failures")
     print(f"Done. Archived {new_count} new file(s) this run; {skipped_size} skipped on size.")
     return 0
 
