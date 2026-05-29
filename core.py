@@ -7,7 +7,7 @@ import time
 
 import requests
 from huggingface_hub import HfApi
-from huggingface_hub.utils import EntryNotFoundError
+from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
 
 RETRY_STATUS = {500, 502, 503, 504, 520, 522, 524}
 
@@ -137,6 +137,53 @@ def save_manifest(api, repo_id, archived_ids):
         repo_type="model",
         commit_message=f"Update manifest ({len(archived_ids)} versions)",
     )
+
+
+def _retry_after(resp, default=130):
+    try:
+        return int(resp.headers.get("Retry-After", default)) + 5
+    except (TypeError, ValueError):
+        return default
+
+
+def upload_folder_with_retry(api, repo_id, folder_path, commit_message, attempts=8):
+    """Upload a whole folder in ONE commit, backing off on HF 429 commit-rate limits."""
+    for i in range(attempts):
+        try:
+            api.upload_folder(
+                folder_path=folder_path,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=commit_message,
+            )
+            return
+        except HfHubHTTPError as e:
+            resp = getattr(e, "response", None)
+            if resp is not None and resp.status_code == 429:
+                wait = _retry_after(resp)
+                print(f"  HF 429 (commit rate limit); sleeping {wait}s", flush=True)
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(f"upload_folder failed after {attempts} attempts (rate limited)")
+
+
+def stage_download(staging_dir, model, version):
+    """Download one version's primary file into staging_dir at its repo-relative path.
+    Returns (rel_path, size_bytes) or None."""
+    primary = pick_primary_file(version)
+    if not primary:
+        return None
+    rel_path = repo_path_for(model, version, primary["name"])
+    dest = os.path.join(staging_dir, rel_path)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        got = stream_download(primary["downloadUrl"], dest, None, int(primary.get("sizeKB", 0) * 1024))
+    except Exception:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise
+    return rel_path, got
 
 
 def archive_version(api, repo_id, model, version, on_progress=None):
