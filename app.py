@@ -1,4 +1,5 @@
 import os
+import time
 from collections import defaultdict
 
 import gradio as gr
@@ -7,8 +8,10 @@ from core import HfApi, archive_version, fetch_version_metadata
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
-QUOTA_TB = float(os.environ.get("QUOTA_TB", "6"))
+QUOTA_TB = float(os.environ.get("QUOTA_TB", "8.7"))
 QUOTA_BYTES = QUOTA_TB * (1024 ** 4)
+SPARK = "▁▂▃▄▅▆▇█"
+MAX_SAMPLES = 30  # rolling window of size samples for bandwidth
 
 
 def _fmt_bytes(n):
@@ -51,15 +54,10 @@ def archive_one(version_id, target_repo, subfolder, progress=gr.Progress()):
 
 # ---------------- Monitor tab ----------------
 
-def storage_stats():
-    if not HF_TOKEN:
-        return "HF_TOKEN not set.", []
-    try:
-        api = HfApi(token=HF_TOKEN)
-        info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
-    except Exception as e:
-        return f"Could not read `{ARCHIVE_REPO}`: {e}", []
-
+def _compute_storage():
+    """Returns (total_bytes, total_files, per_bm dict, recent_md) or raises."""
+    api = HfApi(token=HF_TOKEN)
+    info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
     per_bm = defaultdict(lambda: [0, 0])  # base model -> [count, bytes]
     total_bytes = 0
     total_files = 0
@@ -73,10 +71,6 @@ def storage_stats():
         per_bm[bm][1] += size
         total_bytes += size
         total_files += 1
-
-    pct = (total_bytes / QUOTA_BYTES) * 100 if QUOTA_BYTES else 0
-    bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
-
     recent = ""
     try:
         commits = api.list_repo_commits(repo_id=ARCHIVE_REPO, repo_type="model")[:5]
@@ -84,11 +78,68 @@ def storage_stats():
         recent = "\n\n**Recent activity**\n" + "\n".join(lines)
     except Exception:
         pass
+    return total_bytes, total_files, per_bm, recent
 
+
+def _fmt_duration(seconds):
+    if seconds <= 0 or seconds != seconds or seconds == float("inf"):
+        return "—"
+    d, rem = divmod(int(seconds), 86400)
+    h = rem // 3600
+    if d:
+        return f"{d}d {h}h"
+    m = (rem % 3600) // 60
+    return f"{h}h {m}m" if h else f"{m}m"
+
+
+def monitor(history):
+    """Sample size, derive effective archival bandwidth from size deltas over time."""
+    history = list(history or [])
+    if not HF_TOKEN:
+        return "HF_TOKEN not set.", [], "", history
+    try:
+        total_bytes, total_files, per_bm, recent = _compute_storage()
+    except Exception as e:
+        return f"Could not read `{ARCHIVE_REPO}`: {e}", [], "", history
+
+    now = time.time()
+    history.append([now, total_bytes])
+    history = history[-MAX_SAMPLES:]
+
+    # bandwidth from rolling window (first vs last sample)
+    inst_bps = window_bps = 0.0
+    deltas = []
+    if len(history) >= 2:
+        for (t0, b0), (t1, b1) in zip(history, history[1:]):
+            dt = t1 - t0
+            deltas.append(max(0.0, (b1 - b0) / dt) if dt > 0 else 0.0)
+        inst_bps = deltas[-1]
+        span = history[-1][0] - history[0][0]
+        if span > 0:
+            window_bps = max(0.0, (history[-1][1] - history[0][1]) / span)
+
+    spark = ""
+    if deltas:
+        mx = max(deltas) or 1
+        spark = "".join(SPARK[min(7, int(d / mx * 7))] for d in deltas)
+
+    remaining = max(0, QUOTA_BYTES - total_bytes)
+    eta = _fmt_duration(remaining / window_bps) if window_bps > 0 else "idle"
+    status = "🟢 active" if inst_bps > 0 else "⚪ idle"
+
+    bw_md = (
+        f"## Bandwidth  {status}\n"
+        f"**Now:** {_fmt_bytes(inst_bps)}/s   ·   **Avg ({_fmt_duration(history[-1][0]-history[0][0])} window):** {_fmt_bytes(window_bps)}/s\n\n"
+        f"`{spark}`  _(archival rate, last {len(deltas)} samples)_\n\n"
+        f"**ETA to fill quota at avg rate:** {eta}"
+    )
+
+    pct = (total_bytes / QUOTA_BYTES) * 100 if QUOTA_BYTES else 0
+    bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
     summary = (
         f"## Archive storage\n"
         f"**{_fmt_bytes(total_bytes)}** across **{total_files}** files\n\n"
-        f"`{bar}` **{pct:.2f}%** of {QUOTA_TB:.0f} TB quota\n\n"
+        f"`{bar}` **{pct:.2f}%** of {QUOTA_TB:g} TB quota\n\n"
         f"Repo: https://huggingface.co/{ARCHIVE_REPO}"
         f"{recent}"
     )
@@ -96,7 +147,7 @@ def storage_stats():
         [bm, cnt, _fmt_bytes(b)]
         for bm, (cnt, b) in sorted(per_bm.items(), key=lambda kv: -kv[1][1])
     ]
-    return summary, rows
+    return summary, rows, bw_md, history
 
 
 with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
@@ -111,16 +162,20 @@ with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
         out = gr.Markdown()
         run_btn.click(archive_one, [version_in, repo_in, subfolder_in], out)
 
-    with gr.Tab("Storage monitor"):
-        gr.Markdown("Live view of the archive repo — refreshes every 20s.")
+    with gr.Tab("Storage & bandwidth monitor"):
+        gr.Markdown("Live view of the archive repo — refreshes every 15s.")
+        hist_state = gr.State([])
         refresh_btn = gr.Button("Refresh now")
-        stats_md = gr.Markdown()
+        with gr.Row():
+            stats_md = gr.Markdown()
+            bw_md = gr.Markdown()
         stats_tbl = gr.Dataframe(headers=["Base model", "Files", "Size"], interactive=False)
-        refresh_btn.click(storage_stats, None, [stats_md, stats_tbl])
-        demo.load(storage_stats, None, [stats_md, stats_tbl])
+        outs = [stats_md, stats_tbl, bw_md, hist_state]
+        refresh_btn.click(monitor, hist_state, outs)
+        demo.load(monitor, hist_state, outs)
         try:
-            timer = gr.Timer(20)
-            timer.tick(storage_stats, None, [stats_md, stats_tbl])
+            timer = gr.Timer(15)
+            timer.tick(monitor, hist_state, outs)
         except Exception:
             pass
 
