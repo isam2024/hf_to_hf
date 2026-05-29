@@ -14,6 +14,7 @@ ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
 BASE_MODELS = [b.strip() for b in os.environ.get("BASE_MODELS", "Flux.1 D").split(",") if b.strip()]
 MAX_FILES_PER_RUN = int(os.environ.get("MAX_FILES_PER_RUN", "100"))
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "0"))  # 0 = no limit
+SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "25"))  # manifest commit cadence
 
 
 def main():
@@ -56,11 +57,14 @@ def main():
             if path:
                 archived.add(vid)
                 new_count += 1
-                print(f"  [{new_count}] {path} ({size_mb:.0f}MB)")
-                save_manifest(api, ARCHIVE_REPO, archived)
+                print(f"  [{new_count}] {path} ({size_mb:.0f}MB)", flush=True)
+                if new_count % SAVE_EVERY == 0:
+                    save_manifest(api, ARCHIVE_REPO, archived)
         except Exception as e:
             print(f"  FAIL {model.get('name')} v{vid}: {e}", file=sys.stderr)
 
+    if new_count:
+        save_manifest(api, ARCHIVE_REPO, archived)
     print(f"Done. Archived {new_count} new file(s) this run; {skipped_size} skipped on size.")
     return 0
 
