@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import datetime, timezone
 
 import requests
 from huggingface_hub import HfApi
@@ -58,10 +59,24 @@ def pick_primary_file(version):
     return files[0]
 
 
-def iter_lora_versions(base_models, page_limit=100, max_pages=5000):
+def parse_dt(s):
+    """Parse a Civitai ISO timestamp (or cursor timestamp) to an aware UTC datetime."""
+    if not s:
+        return None
+    s = s.strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_after=None):
     """Yield (model, version) pairs for LoRAs matching any of the given base models.
 
-    Pages through Civitai newest-first using cursor pagination.
+    Pages through Civitai newest-first using cursor pagination. If published_after
+    (an aware datetime) is given, only versions published at/after it are yielded,
+    and paging stops once the cursor timestamp falls before the cutoff (incremental mode).
     """
     cursor = None
     pages = 0
@@ -80,12 +95,22 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000):
             return
         for model in items:
             for version in model.get("modelVersions", []):
-                if version.get("baseModel") in base_models:
-                    yield model, version
+                if version.get("baseModel") not in base_models:
+                    continue
+                if published_after is not None:
+                    pub = parse_dt(version.get("publishedAt"))
+                    if pub is None or pub < published_after:
+                        continue
+                yield model, version
         cursor = data.get("metadata", {}).get("nextCursor")
         pages += 1
         if not cursor:
             return
+        # Incremental early-stop: the cursor's leading timestamp is the sort boundary.
+        if published_after is not None:
+            cdt = parse_dt(cursor.split("|", 1)[0])
+            if cdt is not None and cdt < published_after:
+                return
 
 
 def stream_download(url, dest_path, on_progress=None, expected_bytes=0):

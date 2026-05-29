@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 from huggingface_hub import HfApi
 
@@ -25,6 +26,9 @@ from core import (
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
 BASE_MODELS = [b.strip() for b in os.environ.get("BASE_MODELS", "Flux.1 D").split(",") if b.strip()]
+# MODE: "new" (default) archives only recently-published versions; "backfill" walks the full catalog.
+MODE = os.environ.get("MODE", "new").strip().lower()
+SINCE_DAYS = float(os.environ.get("SINCE_DAYS", "2"))  # "new" window; overlap covers gaps between runs
 MAX_FILES_PER_RUN = int(os.environ.get("MAX_FILES_PER_RUN", "0"))  # 0 = unlimited
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "0"))  # 0 = no limit
 # Batch thresholds: flush when either is reached. Keeps a batch well under the
@@ -41,6 +45,13 @@ def main():
 
     base_set = set(BASE_MODELS)
     cap_desc = MAX_FILES_PER_RUN if MAX_FILES_PER_RUN > 0 else "unlimited"
+    if MODE == "backfill":
+        published_after = None
+        mode_desc = "backfill (full catalog)"
+    else:
+        published_after = datetime.now(timezone.utc) - timedelta(days=SINCE_DAYS)
+        mode_desc = f"new (published since {published_after:%Y-%m-%d %H:%M}Z, last {SINCE_DAYS}d)"
+    print(f"Mode: {mode_desc}")
     print(f"Base models: {sorted(base_set)}")
     print(f"Archive repo: {ARCHIVE_REPO}  |  per-run cap: {cap_desc}  |  batch: {BATCH_FILES} files / {BATCH_GB}GB")
 
@@ -73,7 +84,7 @@ def main():
         batch_bytes = 0
 
     try:
-        for model, version in iter_lora_versions(base_set):
+        for model, version in iter_lora_versions(base_set, published_after=published_after):
             vid = str(version.get("id"))
             if vid in archived:
                 continue

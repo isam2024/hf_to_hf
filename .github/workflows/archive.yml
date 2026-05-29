@@ -5,6 +5,12 @@ on:
     - cron: "0 */6 * * *"   # every 6 hours
   workflow_dispatch:        # allow manual runs from the Actions tab
     inputs:
+      mode:
+        description: "new (recent only) or backfill (full catalog)"
+        required: false
+        type: choice
+        options: [new, backfill]
+        default: new
       base_models:
         description: "Comma-separated Civitai base models"
         required: false
@@ -32,6 +38,8 @@ jobs:
           CIVITAI_API_KEY: ${{ secrets.CIVITAI_API_KEY }}
           ARCHIVE_REPO: ${{ vars.ARCHIVE_REPO || 'isam/civitai-lora-archive' }}
           BASE_MODELS: ${{ github.event.inputs.base_models || vars.BASE_MODELS || 'Flux.1 D' }}
-          MAX_FILES_PER_RUN: ${{ github.event.inputs.max_files || vars.MAX_FILES_PER_RUN || '100' }}
+          MAX_FILES_PER_RUN: ${{ github.event.inputs.max_files || vars.MAX_FILES_PER_RUN || '0' }}
           MAX_FILE_MB: ${{ vars.MAX_FILE_MB || '0' }}
+          MODE: ${{ github.event.inputs.mode || 'new' }}
+          SINCE_DAYS: ${{ vars.SINCE_DAYS || '2' }}
         run: python crawler.py
