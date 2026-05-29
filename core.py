@@ -139,7 +139,9 @@ def repo_path_for(model, version, filename):
     mid = model.get("id", "x")
     slug = _safe(model.get("name", "model"))[:60]
     vid = version.get("id", "x")
-    return f"{bm}/{mid}_{slug}/{vid}/{filename}"
+    pub = parse_dt(version.get("publishedAt"))
+    date = pub.strftime("%Y-%m-%d") if pub else "undated"
+    return f"{date}/{bm}/{mid}_{slug}/{vid}/{filename}"
 
 
 def load_manifest(api, repo_id):

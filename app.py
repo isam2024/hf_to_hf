@@ -1,4 +1,5 @@
 import os
+import re
 from collections import defaultdict
 
 import gradio as gr
@@ -10,6 +11,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
 QUOTA_TB = float(os.environ.get("QUOTA_TB", "8.7"))
 QUOTA_BYTES = QUOTA_TB * (1024 ** 4)
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _fmt_bytes(n):
@@ -64,6 +66,15 @@ def _repo_used_bytes():
     return int(r.json().get("usedStorage") or 0)
 
 
+def _base_model_of(name):
+    """Extract base model from a repo path, handling both old (base/...) and
+    new date-prefixed (YYYY-MM-DD/base/...) layouts."""
+    parts = name.split("/")
+    if parts and (DATE_RE.match(parts[0]) or parts[0] == "undated") and len(parts) > 1:
+        return parts[1]
+    return parts[0] if parts else "(root)"
+
+
 def _breakdown():
     """Expensive per-base-model breakdown — only run on demand, never on the timer."""
     api = HfApi(token=HF_TOKEN)
@@ -73,7 +84,7 @@ def _breakdown():
         name = s.rfilename
         if name in ("manifest.json", ".gitattributes") or name.endswith(".md"):
             continue
-        bm = name.split("/", 1)[0] if "/" in name else "(root)"
+        bm = _base_model_of(name)
         per_bm[bm][0] += 1
         per_bm[bm][1] += s.size or 0
     return [
