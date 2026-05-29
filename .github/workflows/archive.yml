@@ -1,0 +1,37 @@
+name: Archive Civitai LoRAs
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours
+  workflow_dispatch:        # allow manual runs from the Actions tab
+    inputs:
+      base_models:
+        description: "Comma-separated Civitai base models"
+        required: false
+      max_files:
+        description: "Max files to archive this run"
+        required: false
+
+concurrency:
+  group: civitai-archive
+  cancel-in-progress: false   # never interrupt an in-flight crawl
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # under GitHub's 6h ceiling
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Run crawler
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CIVITAI_API_KEY: ${{ secrets.CIVITAI_API_KEY }}
+          ARCHIVE_REPO: ${{ vars.ARCHIVE_REPO || 'isam/civitai-lora-archive' }}
+          BASE_MODELS: ${{ github.event.inputs.base_models || vars.BASE_MODELS || 'Flux.1 D' }}
+          MAX_FILES_PER_RUN: ${{ github.event.inputs.max_files || vars.MAX_FILES_PER_RUN || '100' }}
+          MAX_FILE_MB: ${{ vars.MAX_FILE_MB || '0' }}
+        run: python crawler.py
