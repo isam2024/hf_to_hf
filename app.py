@@ -13,6 +13,7 @@ QUOTA_TB = float(os.environ.get("QUOTA_TB", "8.7"))
 QUOTA_BYTES = QUOTA_TB * (1024 ** 4)
 SPARK = "▁▂▃▄▅▆▇█"
 MAX_SAMPLES = 30  # rolling window of size samples for bandwidth
+_HISTORY = []  # module-level [(t, bytes)] samples; single-owner monitor, no per-session state
 
 
 def _fmt_bytes(n):
@@ -96,19 +97,19 @@ def _fmt_duration(seconds):
     return f"{h}h {m}m" if h else f"{m}m"
 
 
-def monitor(history):
+def monitor():
     """Cheap tick: total size + derived bandwidth. Safe to run every 15s."""
-    history = list(history or [])
     if not HF_TOKEN:
-        return "HF_TOKEN not set.", "", history
+        return "HF_TOKEN not set.", ""
     try:
         total_bytes = _repo_used_bytes()
     except Exception as e:
-        return f"Could not read `{ARCHIVE_REPO}`: {e}", "", history
+        return f"Could not read `{ARCHIVE_REPO}`: {e}", ""
 
-    now = time.time()
-    history.append([now, total_bytes])
-    history = history[-MAX_SAMPLES:]
+    global _HISTORY
+    _HISTORY.append([time.time(), total_bytes])
+    _HISTORY = _HISTORY[-MAX_SAMPLES:]
+    history = _HISTORY
 
     inst_bps = window_bps = 0.0
     deltas = []
@@ -146,17 +147,17 @@ def monitor(history):
         f"`{bar}` **{pct:.2f}%** of {QUOTA_TB:g} TB quota\n\n"
         f"Repo: https://huggingface.co/{ARCHIVE_REPO}"
     )
-    return summary, bw_md, history
+    return summary, bw_md
 
 
-def full_refresh(history):
+def full_refresh():
     """Manual refresh: cheap tick + the expensive per-model breakdown."""
-    summary, bw_md, history = monitor(history)
+    summary, bw_md = monitor()
     try:
         rows = _breakdown()
     except Exception:
         rows = []
-    return summary, bw_md, rows, history
+    return summary, bw_md, rows
 
 
 with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
@@ -176,18 +177,17 @@ with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
             "Size & bandwidth refresh live every 15s. "
             "Click **Refresh now** for the per-model breakdown (heavier query)."
         )
-        hist_state = gr.State([])
         refresh_btn = gr.Button("Refresh now")
         with gr.Row():
             stats_md = gr.Markdown()
             bw_md = gr.Markdown()
         stats_tbl = gr.Dataframe(headers=["Base model", "Files", "Size"], interactive=False)
-        # Timer + load: cheap path only (size + bandwidth), no per-file listing.
-        demo.load(monitor, hist_state, [stats_md, bw_md, hist_state])
-        refresh_btn.click(full_refresh, hist_state, [stats_md, bw_md, stats_tbl, hist_state])
+        # Timer + load: cheap path only (size + bandwidth), no per-file listing, no State.
+        demo.load(monitor, None, [stats_md, bw_md])
+        refresh_btn.click(full_refresh, None, [stats_md, bw_md, stats_tbl])
         try:
             timer = gr.Timer(15)
-            timer.tick(monitor, hist_state, [stats_md, bw_md, hist_state])
+            timer.tick(monitor, None, [stats_md, bw_md])
         except Exception:
             pass
 
