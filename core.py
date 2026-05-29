@@ -58,7 +58,7 @@ def pick_primary_file(version):
     return files[0]
 
 
-def iter_lora_versions(base_models, page_limit=100, max_pages=50):
+def iter_lora_versions(base_models, page_limit=100, max_pages=5000):
     """Yield (model, version) pairs for LoRAs matching any of the given base models.
 
     Pages through Civitai newest-first using cursor pagination.

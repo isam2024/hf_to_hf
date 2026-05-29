@@ -12,7 +12,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
 # Comma-separated Civitai base-model strings. Confirm exact spellings against Civitai.
 BASE_MODELS = [b.strip() for b in os.environ.get("BASE_MODELS", "Flux.1 D").split(",") if b.strip()]
-MAX_FILES_PER_RUN = int(os.environ.get("MAX_FILES_PER_RUN", "100"))
+MAX_FILES_PER_RUN = int(os.environ.get("MAX_FILES_PER_RUN", "0"))  # 0 = unlimited (run until 6h timeout / catalog end)
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "0"))  # 0 = no limit
 SAVE_EVERY = int(os.environ.get("SAVE_EVERY", "25"))  # manifest commit cadence
 
@@ -23,8 +23,9 @@ def main():
         return 1
 
     base_set = set(BASE_MODELS)
+    cap_desc = MAX_FILES_PER_RUN if MAX_FILES_PER_RUN > 0 else "unlimited"
     print(f"Base models: {sorted(base_set)}")
-    print(f"Archive repo: {ARCHIVE_REPO}  |  per-run cap: {MAX_FILES_PER_RUN}")
+    print(f"Archive repo: {ARCHIVE_REPO}  |  per-run cap: {cap_desc}")
 
     api = HfApi(token=HF_TOKEN)
     api.create_repo(repo_id=ARCHIVE_REPO, repo_type="model", exist_ok=True)
@@ -37,7 +38,7 @@ def main():
         vid = str(version.get("id"))
         if vid in archived:
             continue
-        if new_count >= MAX_FILES_PER_RUN:
+        if MAX_FILES_PER_RUN > 0 and new_count >= MAX_FILES_PER_RUN:
             print(f"Hit per-run cap ({MAX_FILES_PER_RUN}); remaining will be picked up next run.")
             break
 

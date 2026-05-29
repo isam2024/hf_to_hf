@@ -3,6 +3,7 @@ import time
 from collections import defaultdict
 
 import gradio as gr
+import requests
 
 from core import HfApi, archive_version, fetch_version_metadata
 
@@ -54,31 +55,34 @@ def archive_one(version_id, target_repo, subfolder, progress=gr.Progress()):
 
 # ---------------- Monitor tab ----------------
 
-def _compute_storage():
-    """Returns (total_bytes, total_files, per_bm dict, recent_md) or raises."""
+def _repo_used_bytes():
+    """Cheap single-call total repo size via HF's usedStorage field."""
+    r = requests.get(
+        f"https://huggingface.co/api/models/{ARCHIVE_REPO}",
+        params={"expand[]": "usedStorage"},
+        headers={"Authorization": f"Bearer {HF_TOKEN}"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return int(r.json().get("usedStorage") or 0)
+
+
+def _breakdown():
+    """Expensive per-base-model breakdown — only run on demand, never on the timer."""
     api = HfApi(token=HF_TOKEN)
     info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
-    per_bm = defaultdict(lambda: [0, 0])  # base model -> [count, bytes]
-    total_bytes = 0
-    total_files = 0
+    per_bm = defaultdict(lambda: [0, 0])
     for s in info.siblings:
         name = s.rfilename
         if name in ("manifest.json", ".gitattributes") or name.endswith(".md"):
             continue
-        size = s.size or 0
         bm = name.split("/", 1)[0] if "/" in name else "(root)"
         per_bm[bm][0] += 1
-        per_bm[bm][1] += size
-        total_bytes += size
-        total_files += 1
-    recent = ""
-    try:
-        commits = api.list_repo_commits(repo_id=ARCHIVE_REPO, repo_type="model")[:5]
-        lines = [f"- `{c.created_at:%Y-%m-%d %H:%M}` — {c.title[:70]}" for c in commits]
-        recent = "\n\n**Recent activity**\n" + "\n".join(lines)
-    except Exception:
-        pass
-    return total_bytes, total_files, per_bm, recent
+        per_bm[bm][1] += s.size or 0
+    return [
+        [bm, cnt, _fmt_bytes(b)]
+        for bm, (cnt, b) in sorted(per_bm.items(), key=lambda kv: -kv[1][1])
+    ]
 
 
 def _fmt_duration(seconds):
@@ -93,20 +97,19 @@ def _fmt_duration(seconds):
 
 
 def monitor(history):
-    """Sample size, derive effective archival bandwidth from size deltas over time."""
+    """Cheap tick: total size + derived bandwidth. Safe to run every 15s."""
     history = list(history or [])
     if not HF_TOKEN:
-        return "HF_TOKEN not set.", [], "", history
+        return "HF_TOKEN not set.", "", history
     try:
-        total_bytes, total_files, per_bm, recent = _compute_storage()
+        total_bytes = _repo_used_bytes()
     except Exception as e:
-        return f"Could not read `{ARCHIVE_REPO}`: {e}", [], "", history
+        return f"Could not read `{ARCHIVE_REPO}`: {e}", "", history
 
     now = time.time()
     history.append([now, total_bytes])
     history = history[-MAX_SAMPLES:]
 
-    # bandwidth from rolling window (first vs last sample)
     inst_bps = window_bps = 0.0
     deltas = []
     if len(history) >= 2:
@@ -126,10 +129,11 @@ def monitor(history):
     remaining = max(0, QUOTA_BYTES - total_bytes)
     eta = _fmt_duration(remaining / window_bps) if window_bps > 0 else "idle"
     status = "🟢 active" if inst_bps > 0 else "⚪ idle"
+    win = _fmt_duration(history[-1][0] - history[0][0]) if len(history) >= 2 else "—"
 
     bw_md = (
         f"## Bandwidth  {status}\n"
-        f"**Now:** {_fmt_bytes(inst_bps)}/s   ·   **Avg ({_fmt_duration(history[-1][0]-history[0][0])} window):** {_fmt_bytes(window_bps)}/s\n\n"
+        f"**Now:** {_fmt_bytes(inst_bps)}/s   ·   **Avg ({win} window):** {_fmt_bytes(window_bps)}/s\n\n"
         f"`{spark}`  _(archival rate, last {len(deltas)} samples)_\n\n"
         f"**ETA to fill quota at avg rate:** {eta}"
     )
@@ -138,16 +142,21 @@ def monitor(history):
     bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
     summary = (
         f"## Archive storage\n"
-        f"**{_fmt_bytes(total_bytes)}** across **{total_files}** files\n\n"
+        f"**{_fmt_bytes(total_bytes)}** stored\n\n"
         f"`{bar}` **{pct:.2f}%** of {QUOTA_TB:g} TB quota\n\n"
         f"Repo: https://huggingface.co/{ARCHIVE_REPO}"
-        f"{recent}"
     )
-    rows = [
-        [bm, cnt, _fmt_bytes(b)]
-        for bm, (cnt, b) in sorted(per_bm.items(), key=lambda kv: -kv[1][1])
-    ]
-    return summary, rows, bw_md, history
+    return summary, bw_md, history
+
+
+def full_refresh(history):
+    """Manual refresh: cheap tick + the expensive per-model breakdown."""
+    summary, bw_md, history = monitor(history)
+    try:
+        rows = _breakdown()
+    except Exception:
+        rows = []
+    return summary, bw_md, rows, history
 
 
 with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
@@ -163,19 +172,22 @@ with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
         run_btn.click(archive_one, [version_in, repo_in, subfolder_in], out)
 
     with gr.Tab("Storage & bandwidth monitor"):
-        gr.Markdown("Live view of the archive repo — refreshes every 15s.")
+        gr.Markdown(
+            "Size & bandwidth refresh live every 15s. "
+            "Click **Refresh now** for the per-model breakdown (heavier query)."
+        )
         hist_state = gr.State([])
         refresh_btn = gr.Button("Refresh now")
         with gr.Row():
             stats_md = gr.Markdown()
             bw_md = gr.Markdown()
         stats_tbl = gr.Dataframe(headers=["Base model", "Files", "Size"], interactive=False)
-        outs = [stats_md, stats_tbl, bw_md, hist_state]
-        refresh_btn.click(monitor, hist_state, outs)
-        demo.load(monitor, hist_state, outs)
+        # Timer + load: cheap path only (size + bandwidth), no per-file listing.
+        demo.load(monitor, hist_state, [stats_md, bw_md, hist_state])
+        refresh_btn.click(full_refresh, hist_state, [stats_md, bw_md, stats_tbl, hist_state])
         try:
             timer = gr.Timer(15)
-            timer.tick(monitor, hist_state, outs)
+            timer.tick(monitor, hist_state, [stats_md, bw_md, hist_state])
         except Exception:
             pass
 
