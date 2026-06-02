@@ -60,23 +60,36 @@ _SIZE_CACHE = {"at": 0.0, "bytes": 0, "files": 0}
 _SIZE_TTL = 300  # seconds
 
 
+_META = ("manifest.json", "skiplist.json", "backfill_state.json", ".gitattributes")
+
+
+def _iter_files():
+    """Walk the repo tree recursively. list_repo_tree is paginated, so it works
+    for arbitrarily large repos (unlike repo_info.siblings which returns 0)."""
+    api = HfApi(token=HF_TOKEN)
+    for item in api.list_repo_tree(
+        repo_id=ARCHIVE_REPO, repo_type="model", recursive=True, expand=True
+    ):
+        if not hasattr(item, "size"):  # RepoFolder, skip
+            continue
+        if item.path in _META or item.path.endswith(".md"):
+            continue
+        sz = item.size
+        if getattr(item, "lfs", None):
+            sz = item.lfs.size
+        yield item.path, sz or 0
+
+
 def _repo_size_and_count():
-    """Sum of all archived file sizes, with TTL cache. HF's usedStorage field
-    lags behind recent commits, so we authoritatively sum repo_info siblings."""
+    """Sum of all archived file sizes, with TTL cache."""
     now = time.time()
     if now - _SIZE_CACHE["at"] < _SIZE_TTL and _SIZE_CACHE["at"] > 0:
         return _SIZE_CACHE["bytes"], _SIZE_CACHE["files"]
-    api = HfApi(token=HF_TOKEN)
-    info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
     total = 0
     files = 0
-    for s in info.siblings:
-        name = s.rfilename
-        if name in ("manifest.json", "skiplist.json", "backfill_state.json", ".gitattributes") or name.endswith(".md"):
-            continue
-        if s.size:
-            total += s.size
-            files += 1
+    for _path, sz in _iter_files():
+        total += sz
+        files += 1
     _SIZE_CACHE.update(at=now, bytes=total, files=files)
     return total, files
 
@@ -91,21 +104,15 @@ def _base_model_of(name):
 
 
 def _breakdown():
-    """Per-base-model breakdown. Forces a fresh listing and updates the size cache."""
-    api = HfApi(token=HF_TOKEN)
-    info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
+    """Per-base-model breakdown. Forces a fresh tree walk and updates the size cache."""
     per_bm = defaultdict(lambda: [0, 0])
     total = 0
     files = 0
-    for s in info.siblings:
-        name = s.rfilename
-        if name in ("manifest.json", "skiplist.json", "backfill_state.json", ".gitattributes") or name.endswith(".md"):
-            continue
-        bm = _base_model_of(name)
-        size = s.size or 0
+    for path, sz in _iter_files():
+        bm = _base_model_of(path)
         per_bm[bm][0] += 1
-        per_bm[bm][1] += size
-        total += size
+        per_bm[bm][1] += sz
+        total += sz
         files += 1
     _SIZE_CACHE.update(at=time.time(), bytes=total, files=files)
     return [
