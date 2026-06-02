@@ -1,9 +1,9 @@
 import os
 import re
+import time
 from collections import defaultdict
 
 import gradio as gr
-import requests
 
 from core import HfApi, archive_version, fetch_version_metadata
 
@@ -54,16 +54,31 @@ def archive_one(version_id, target_repo, subfolder, progress=gr.Progress()):
 
 # ---------------- Monitor tab ----------------
 
-def _repo_used_bytes():
-    """Cheap single-call total repo size via HF's usedStorage field."""
-    r = requests.get(
-        f"https://huggingface.co/api/models/{ARCHIVE_REPO}",
-        params={"expand[]": "usedStorage"},
-        headers={"Authorization": f"Bearer {HF_TOKEN}"},
-        timeout=15,
-    )
-    r.raise_for_status()
-    return int(r.json().get("usedStorage") or 0)
+# Cache the (size, count) tuple for a few minutes so the 15s timer
+# doesn't saturate the worker by re-listing files every tick.
+_SIZE_CACHE = {"at": 0.0, "bytes": 0, "files": 0}
+_SIZE_TTL = 300  # seconds
+
+
+def _repo_size_and_count():
+    """Sum of all archived file sizes, with TTL cache. HF's usedStorage field
+    lags behind recent commits, so we authoritatively sum repo_info siblings."""
+    now = time.time()
+    if now - _SIZE_CACHE["at"] < _SIZE_TTL and _SIZE_CACHE["at"] > 0:
+        return _SIZE_CACHE["bytes"], _SIZE_CACHE["files"]
+    api = HfApi(token=HF_TOKEN)
+    info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
+    total = 0
+    files = 0
+    for s in info.siblings:
+        name = s.rfilename
+        if name in ("manifest.json", "skiplist.json", "backfill_state.json", ".gitattributes") or name.endswith(".md"):
+            continue
+        if s.size:
+            total += s.size
+            files += 1
+    _SIZE_CACHE.update(at=now, bytes=total, files=files)
+    return total, files
 
 
 def _base_model_of(name):
@@ -76,17 +91,23 @@ def _base_model_of(name):
 
 
 def _breakdown():
-    """Expensive per-base-model breakdown — only run on demand, never on the timer."""
+    """Per-base-model breakdown. Forces a fresh listing and updates the size cache."""
     api = HfApi(token=HF_TOKEN)
     info = api.repo_info(repo_id=ARCHIVE_REPO, repo_type="model", files_metadata=True)
     per_bm = defaultdict(lambda: [0, 0])
+    total = 0
+    files = 0
     for s in info.siblings:
         name = s.rfilename
-        if name in ("manifest.json", "skiplist.json", ".gitattributes") or name.endswith(".md"):
+        if name in ("manifest.json", "skiplist.json", "backfill_state.json", ".gitattributes") or name.endswith(".md"):
             continue
         bm = _base_model_of(name)
+        size = s.size or 0
         per_bm[bm][0] += 1
-        per_bm[bm][1] += s.size or 0
+        per_bm[bm][1] += size
+        total += size
+        files += 1
+    _SIZE_CACHE.update(at=time.time(), bytes=total, files=files)
     return [
         [bm, cnt, _fmt_bytes(b)]
         for bm, (cnt, b) in sorted(per_bm.items(), key=lambda kv: -kv[1][1])
@@ -94,11 +115,11 @@ def _breakdown():
 
 
 def monitor():
-    """Cheap tick: total archived size vs quota. Safe to run every 15s."""
+    """Total archived size vs quota. Cached for 5 min so the 15s tick is cheap."""
     if not HF_TOKEN:
         return "HF_TOKEN not set."
     try:
-        total_bytes = _repo_used_bytes()
+        total_bytes, file_count = _repo_size_and_count()
     except Exception as e:
         return f"Could not read `{ARCHIVE_REPO}`: {e}"
 
@@ -106,20 +127,19 @@ def monitor():
     bar = "█" * int(pct / 5) + "░" * (20 - int(pct / 5))
     return (
         f"## Archive storage\n"
-        f"**{_fmt_bytes(total_bytes)}** stored\n\n"
+        f"**{_fmt_bytes(total_bytes)}** stored across **{file_count}** files\n\n"
         f"`{bar}` **{pct:.2f}%** of {QUOTA_TB:g} TB quota\n\n"
         f"Repo: https://huggingface.co/{ARCHIVE_REPO}"
     )
 
 
 def full_refresh():
-    """Manual refresh: size + the expensive per-model breakdown."""
-    summary = monitor()
+    """Manual refresh: force a fresh listing (bypassing the cache) and rebuild the breakdown."""
     try:
         rows = _breakdown()
     except Exception:
         rows = []
-    return summary, rows
+    return monitor(), rows
 
 
 with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
@@ -136,8 +156,8 @@ with gr.Blocks(title="Civitai → Hugging Face archiver") as demo:
 
     with gr.Tab("Storage monitor"):
         gr.Markdown(
-            "Total size refreshes live every 15s. "
-            "Click **Refresh now** for the per-model breakdown (heavier query)."
+            "Total size is cached for 5 minutes and refreshes on the 15s tick. "
+            "Click **Refresh now** to force a fresh listing and rebuild the per-model breakdown."
         )
         refresh_btn = gr.Button("Refresh now")
         stats_md = gr.Markdown()
