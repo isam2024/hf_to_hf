@@ -1,8 +1,11 @@
 name: Archive Civitai LoRAs
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+  # Cron disabled while HF rate-limit cools down after super_squash on 2026-06-05.
+  # Each failed cron PUTs bytes via preupload before bailing, which creates more
+  # orphans and keeps the throttle engaged. Re-enable once dispatch runs succeed.
+  # schedule:
+  #   - cron: "0 */6 * * *"   # every 6 hours
   workflow_dispatch:        # allow manual runs from the Actions tab
     inputs:
       mode:
