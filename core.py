@@ -87,8 +87,16 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
     `nsfw=true`. Doubles pagination cost; manifest dedupe handles overlap. To
     revert to PG-13-only behavior, remove the outer `for nsfw_mode` loop and
     inline the body with nsfw_mode = None.
+
+    BASE MODEL: Civitai's `baseModels` param is single-value only. Tested
+    encodings: repeated key (`?baseModels=A&baseModels=B`) silently drops some
+    values; comma-string and JSON-array return 0 results; `[]` suffix is
+    ignored entirely. So we iterate once per base model — N base × 2 NSFW
+    modes = 2N passes per call. To revert, replace the inner loop with one
+    pass passing `list(base_models)` as before.
     """
     for nsfw_mode in (None, "true"):
+      for bm in sorted(base_models):
         cursor = None
         pages = 0
         while pages < max_pages:
@@ -96,7 +104,7 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
                 "types": "LORA",
                 "sort": "Newest",
                 "limit": page_limit,
-                "baseModels": list(base_models),
+                "baseModels": bm,
             }
             if nsfw_mode is not None:
                 params["nsfw"] = nsfw_mode
@@ -120,7 +128,7 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
             if verbose:
                 edge = cursor.split("|", 1)[0] if cursor else "end"
                 mode = "nsfw" if nsfw_mode else "sfw"
-                print(f"  ...scanned catalog page {pages} [{mode}] (cursor {edge})", flush=True)
+                print(f"  ...scanned page {pages} [{bm}|{mode}] (cursor {edge})", flush=True)
             if not cursor:
                 break
             # Incremental early-stop: the cursor's leading timestamp is the sort boundary.
