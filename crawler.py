@@ -139,6 +139,11 @@ def run_new(ctx, base_set):
 
 def run_backfill(ctx, base_set):
     ceiling = load_backfill_ceiling(ctx.api, ARCHIVE_REPO) or datetime.now(timezone.utc)
+    # Track the deepest publishedAt we've actually examined (called process_version on).
+    # The window-top `ceiling` only advances on clean window completion, so it lags reality
+    # badly when a run is killed by timeout. `deepest` is monotonic-descending and reflects
+    # actual scan progress, so persisting it survives mid-window kills without losing work.
+    deepest = ceiling
     print(f"Mode: backfill (descending date windows of {WINDOW_DAYS}d, starting from {ceiling:%Y-%m-%d %H:%M}Z)")
     empty_streak = 0
     cap_hit = False
@@ -159,8 +164,19 @@ def run_backfill(ctx, base_set):
                 empty_streak += 1
             else:
                 empty_streak = 0
-            for _pub, model, version in window:
+            for pub, model, version in window:
+                batch_before = ctx.batch_files
                 outcome = process_version(ctx, model, version)
+                # Every version we just called through process_version (regardless of outcome)
+                # has been examined. Versions are sorted desc by pub, so `pub` is monotonic-desc.
+                if pub < deepest:
+                    deepest = pub
+                # A drop from batch_before>0 to 0 means process_version triggered ctx.flush().
+                # Persist scan progress at this natural batch boundary so a SIGTERM after this
+                # point still records the depth we reached.
+                if outcome == "ok" and batch_before > 0 and ctx.batch_files == 0:
+                    save_backfill_ceiling(ctx.api, ARCHIVE_REPO, deepest)
+                    print(f"  ceiling persisted at {deepest:%Y-%m-%d %H:%M}Z", flush=True)
                 if outcome == "cap":
                     cap_hit = True
                     print(f"Hit per-run cap ({MAX_FILES_PER_RUN}); resuming this window next run.")
@@ -169,12 +185,14 @@ def run_backfill(ctx, base_set):
                 # Don't advance ceiling — re-process this window next run (dedupe skips done items).
                 break
             ceiling = floor  # window fully processed; descend
+            if floor < deepest:
+                deepest = floor  # record that we've examined everything down to this floor
     finally:
         ctx.flush()
-        # Persist whichever ceiling we ended on (advanced past completed windows, or held on the
-        # one we stopped inside). Manifest dedupe ensures correctness either way.
-        save_backfill_ceiling(ctx.api, ARCHIVE_REPO, ceiling)
-        print(f"Backfill ceiling saved at {ceiling:%Y-%m-%d %H:%M}Z")
+        # Save the actual scan depth, not the window-top ceiling that may not have advanced.
+        final = min(ceiling, deepest)
+        save_backfill_ceiling(ctx.api, ARCHIVE_REPO, final)
+        print(f"Backfill ceiling saved at {final:%Y-%m-%d %H:%M}Z")
 
 
 def main():
