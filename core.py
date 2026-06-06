@@ -80,43 +80,54 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
     (an aware datetime) is given, only versions published at/after it are yielded,
     and paging stops once the cursor timestamp falls before the cutoff (incremental mode).
     When verbose, prints a heartbeat per page so pure pagination doesn't look frozen.
+
+    NSFW: Civitai's `nsfw` query param is a *filter*, not an include-all flag —
+    `nsfw=true` swaps in NSFW LoRAs *instead of* SFW ones (same page limit). To
+    surface the full catalog we paginate twice: once default (SFW) and once with
+    `nsfw=true`. Doubles pagination cost; manifest dedupe handles overlap. To
+    revert to PG-13-only behavior, remove the outer `for nsfw_mode` loop and
+    inline the body with nsfw_mode = None.
     """
-    cursor = None
-    pages = 0
-    while pages < max_pages:
-        params = {
-            "types": "LORA",
-            "sort": "Newest",
-            "limit": page_limit,
-            "baseModels": list(base_models),
-        }
-        if cursor:
-            params["cursor"] = cursor
-        data = civitai_get(MODELS_API, params=params, timeout=60).json()
-        items = data.get("items", [])
-        if not items:
-            return
-        for model in items:
-            for version in model.get("modelVersions", []):
-                if version.get("baseModel") not in base_models:
-                    continue
-                if published_after is not None:
-                    pub = parse_dt(version.get("publishedAt"))
-                    if pub is None or pub < published_after:
+    for nsfw_mode in (None, "true"):
+        cursor = None
+        pages = 0
+        while pages < max_pages:
+            params = {
+                "types": "LORA",
+                "sort": "Newest",
+                "limit": page_limit,
+                "baseModels": list(base_models),
+            }
+            if nsfw_mode is not None:
+                params["nsfw"] = nsfw_mode
+            if cursor:
+                params["cursor"] = cursor
+            data = civitai_get(MODELS_API, params=params, timeout=60).json()
+            items = data.get("items", [])
+            if not items:
+                break
+            for model in items:
+                for version in model.get("modelVersions", []):
+                    if version.get("baseModel") not in base_models:
                         continue
-                yield model, version
-        cursor = data.get("metadata", {}).get("nextCursor")
-        pages += 1
-        if verbose:
-            edge = cursor.split("|", 1)[0] if cursor else "end"
-            print(f"  ...scanned catalog page {pages} (cursor {edge})", flush=True)
-        if not cursor:
-            return
-        # Incremental early-stop: the cursor's leading timestamp is the sort boundary.
-        if published_after is not None:
-            cdt = parse_dt(cursor.split("|", 1)[0])
-            if cdt is not None and cdt < published_after:
-                return
+                    if published_after is not None:
+                        pub = parse_dt(version.get("publishedAt"))
+                        if pub is None or pub < published_after:
+                            continue
+                    yield model, version
+            cursor = data.get("metadata", {}).get("nextCursor")
+            pages += 1
+            if verbose:
+                edge = cursor.split("|", 1)[0] if cursor else "end"
+                mode = "nsfw" if nsfw_mode else "sfw"
+                print(f"  ...scanned catalog page {pages} [{mode}] (cursor {edge})", flush=True)
+            if not cursor:
+                break
+            # Incremental early-stop: the cursor's leading timestamp is the sort boundary.
+            if published_after is not None:
+                cdt = parse_dt(cursor.split("|", 1)[0])
+                if cdt is not None and cdt < published_after:
+                    break
 
 
 def stream_download(url, dest_path, on_progress=None, expected_bytes=0):
