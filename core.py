@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 import requests
 from huggingface_hub import HfApi
-from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError
+from huggingface_hub.utils import EntryNotFoundError, HfHubHTTPError, LocalEntryNotFoundError
 
 RETRY_STATUS = {500, 502, 503, 504, 520, 522, 524}
 
@@ -174,6 +174,14 @@ def load_manifest(api, repo_id):
         path = api.hf_hub_download(repo_id=repo_id, filename=MANIFEST_PATH, repo_type="model")
         with open(path) as fh:
             return set(json.load(fh).get("archived_version_ids", []))
+    except LocalEntryNotFoundError:
+        # Subclass of EntryNotFoundError, but means "fetch failed + no local cache" not
+        # "file doesn't exist on hub." Treating it as missing would silently re-archive
+        # the entire manifest on the next commit. Fail loud.
+        raise RuntimeError(
+            "Could not fetch manifest.json (likely HF rate-limit). Aborting to avoid "
+            "polluting the manifest with a re-archive of every existing version."
+        )
     except (EntryNotFoundError, FileNotFoundError):
         return set()
 
@@ -184,6 +192,8 @@ def load_skiplist(api, repo_id):
         path = api.hf_hub_download(repo_id=repo_id, filename=SKIPLIST_PATH, repo_type="model")
         with open(path) as fh:
             return set(json.load(fh).get("failed_version_ids", []))
+    except LocalEntryNotFoundError:
+        raise RuntimeError("Could not fetch skiplist.json (likely HF rate-limit). Aborting.")
     except (EntryNotFoundError, FileNotFoundError):
         return set()
 
