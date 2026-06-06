@@ -187,6 +187,11 @@ def run_backfill(ctx, base_set):
             ceiling = floor  # window fully processed; descend
             if floor < deepest:
                 deepest = floor  # record that we've examined everything down to this floor
+            # Persist eagerly per-window. SIGTERM during the next window's pagination
+            # kills the process inside a network call before any `finally` runs, so
+            # in-memory state without a write here is lost on cancellation.
+            save_backfill_ceiling(ctx.api, ARCHIVE_REPO, deepest)
+            print(f"  ceiling persisted at {deepest:%Y-%m-%d %H:%M}Z", flush=True)
     finally:
         ctx.flush()
         # Save the actual scan depth, not the window-top ceiling that may not have advanced.
