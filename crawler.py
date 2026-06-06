@@ -16,7 +16,6 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 from datetime import datetime, timedelta, timezone
 
 from huggingface_hub import HfApi
@@ -48,10 +47,6 @@ MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "0"))  # 0 = no limit
 BATCH_FILES = int(os.environ.get("BATCH_FILES", "40"))
 BATCH_GB = float(os.environ.get("BATCH_GB", "8"))
 BATCH_BYTES = BATCH_GB * (1024 ** 3)
-# Self-throttle: minimum seconds between flushes. HF's preupload/commit
-# rate limits trigger 429 storms when bursts hit. 60s/batch = ~60 commits/hr
-# of headroom under the 128-commits/hr cap, and prevents preupload bursts.
-COMMIT_GAP_SECS = float(os.environ.get("COMMIT_GAP_SECS", "60"))
 
 PERMANENT_HTTP = {401, 403, 404}
 
@@ -69,17 +64,10 @@ class Ctx:
         self.batch_idx = 0
         self.new_count = 0
         self.skipped_size = 0
-        self.last_flush_ts = 0.0
 
     def flush(self):
         if self.batch_files == 0:
             return
-        # Self-throttle so consecutive batches don't burst HF's preupload/commit caps.
-        if self.last_flush_ts:
-            wait = COMMIT_GAP_SECS - (time.time() - self.last_flush_ts)
-            if wait > 0:
-                print(f"  (throttling {wait:.0f}s before next commit)", flush=True)
-                time.sleep(wait)
         with open(os.path.join(self.staging, MANIFEST_PATH), "w") as fh:
             json.dump({"archived_version_ids": sorted(self.archived, key=lambda x: int(x))}, fh, indent=2)
         self.batch_idx += 1
@@ -87,7 +75,6 @@ class Ctx:
         upload_folder_with_retry(
             self.api, ARCHIVE_REPO, self.staging, f"Archive batch {self.batch_idx} ({self.batch_files} files)"
         )
-        self.last_flush_ts = time.time()
         shutil.rmtree(self.staging, ignore_errors=True)
         self.staging = tempfile.mkdtemp(prefix="civitai_batch_")
         self.batch_files = 0
