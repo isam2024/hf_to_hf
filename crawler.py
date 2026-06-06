@@ -227,7 +227,13 @@ def main():
     print(f"Archive repo: {ARCHIVE_REPO}  |  per-run cap: {cap_desc}  |  batch: {BATCH_FILES} files / {BATCH_GB}GB")
 
     api = HfApi(token=HF_TOKEN)
-    api.create_repo(repo_id=ARCHIVE_REPO, repo_type="model", exist_ok=True)
+    # The repo has existed since day one; create_repo(exist_ok=True) here is just
+    # a safety net. HF rate-limits /api/repos/create separately from upload, so
+    # don't let a 429 there abort the whole run.
+    try:
+        api.create_repo(repo_id=ARCHIVE_REPO, repo_type="model", exist_ok=True)
+    except Exception as e:
+        print(f"create_repo skipped ({e.__class__.__name__}); assuming repo exists", file=sys.stderr)
     archived = load_manifest(api, ARCHIVE_REPO)
     skiplist = load_skiplist(api, ARCHIVE_REPO)
     print(f"Manifest: {len(archived)} archived  |  skiplist: {len(skiplist)} permanent failures")
