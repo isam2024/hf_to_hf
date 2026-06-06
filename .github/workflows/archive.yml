@@ -46,3 +46,18 @@ jobs:
           MODE: ${{ github.event.inputs.mode || 'new' }}
           SINCE_DAYS: ${{ vars.SINCE_DAYS || '2' }}
         run: python crawler.py
+
+      - name: Backup manifest + skiplist to GH
+        if: success()
+        env:
+          ARCHIVE_REPO: ${{ vars.ARCHIVE_REPO || 'isam/civitai-lora-archive' }}
+        run: |
+          mkdir -p backups
+          curl -sLf "https://huggingface.co/${ARCHIVE_REPO}/resolve/main/manifest.json" -o backups/manifest.json
+          curl -sLf "https://huggingface.co/${ARCHIVE_REPO}/resolve/main/skiplist.json" -o backups/skiplist.json || true
+          curl -sLf "https://huggingface.co/${ARCHIVE_REPO}/resolve/main/backfill_state.json" -o backups/backfill_state.json || true
+          git config user.email "actions@github.com"
+          git config user.name "gh-actions"
+          git add backups/
+          git diff --cached --quiet || git commit -m "Backup manifest after run ${GITHUB_RUN_ID}"
+          git push || true
