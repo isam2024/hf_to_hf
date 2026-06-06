@@ -9,10 +9,10 @@ on:
   workflow_dispatch:        # allow manual runs from the Actions tab
     inputs:
       mode:
-        description: "new (recent only), backfill (descend windows), or heal (gap-fill swept range)"
+        description: "new (recent only) or backfill (full catalog)"
         required: false
         type: choice
-        options: [new, backfill, heal]
+        options: [new, backfill]
         default: new
       base_models:
         description: "Comma-separated Civitai base models"
