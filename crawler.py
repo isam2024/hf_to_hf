@@ -137,6 +137,22 @@ def run_new(ctx, base_set):
     ctx.flush()
 
 
+def run_heal(ctx, base_set):
+    """Single newest-first pass from now back to the backfill ceiling.
+    Dedupe (manifest + skiplist) keeps it cheap — only true gaps download.
+    Catches versions silently dropped on transient errors during normal runs."""
+    floor = load_backfill_ceiling(ctx.api, ARCHIVE_REPO) or (
+        datetime.now(timezone.utc) - timedelta(days=365)
+    )
+    print(f"Mode: heal (newest -> {floor:%Y-%m-%d %H:%M}Z, scanning for gaps in manifest+skiplist)")
+    for model, version in iter_lora_versions(base_set, published_after=floor, verbose=True):
+        outcome = process_version(ctx, model, version)
+        if outcome == "cap":
+            print(f"Hit per-run cap ({MAX_FILES_PER_RUN}); rest picked up next heal run.")
+            break
+    ctx.flush()
+
+
 def run_backfill(ctx, base_set):
     ceiling = load_backfill_ceiling(ctx.api, ARCHIVE_REPO) or datetime.now(timezone.utc)
     # Track the deepest publishedAt we've actually examined (called process_version on).
@@ -220,6 +236,8 @@ def main():
     try:
         if MODE == "backfill":
             run_backfill(ctx, base_set)
+        elif MODE == "heal":
+            run_heal(ctx, base_set)
         else:
             run_new(ctx, base_set)
     finally:
