@@ -64,6 +64,7 @@ class Ctx:
         self.batch_idx = 0
         self.new_count = 0
         self.skipped_size = 0
+        self.batch_entries = []  # (model_id, model_name, version_id) per file in current batch
 
     def flush(self):
         if self.batch_files == 0:
@@ -72,13 +73,24 @@ class Ctx:
             json.dump({"archived_version_ids": sorted(self.archived, key=lambda x: int(x))}, fh, indent=2)
         self.batch_idx += 1
         print(f"  -> flushing batch {self.batch_idx}: {self.batch_files} files / {self.batch_bytes/(1024**3):.2f}GB", flush=True)
-        upload_folder_with_retry(
-            self.api, ARCHIVE_REPO, self.staging, f"Archive batch {self.batch_idx} ({self.batch_files} files)"
+        # Dedupe by model_id within the batch — many versions per model would otherwise spam the message.
+        seen_models = {}
+        for mid, mname, vid in self.batch_entries:
+            seen_models.setdefault(mid, (mname, []))[1].append(vid)
+        body_lines = [
+            f"- https://civitai.com/models/{mid} — {mname} (v{', v'.join(vids)})"
+            for mid, (mname, vids) in seen_models.items()
+        ]
+        message = (
+            f"Archive batch {self.batch_idx} ({self.batch_files} files, {len(seen_models)} models)\n\n"
+            + "\n".join(body_lines)
         )
+        upload_folder_with_retry(self.api, ARCHIVE_REPO, self.staging, message)
         shutil.rmtree(self.staging, ignore_errors=True)
         self.staging = tempfile.mkdtemp(prefix="civitai_batch_")
         self.batch_files = 0
         self.batch_bytes = 0
+        self.batch_entries = []
 
     def cleanup(self):
         shutil.rmtree(self.staging, ignore_errors=True)
@@ -120,6 +132,7 @@ def process_version(ctx, model, version):
     ctx.new_count += 1
     ctx.batch_files += 1
     ctx.batch_bytes += got
+    ctx.batch_entries.append((str(model.get("id", "")), model.get("name", ""), vid))
     print(f"  [{ctx.new_count}] staged {rel_path} ({got/(1024**2):.0f}MB)", flush=True)
     if ctx.batch_files >= BATCH_FILES or ctx.batch_bytes >= BATCH_BYTES:
         ctx.flush()
