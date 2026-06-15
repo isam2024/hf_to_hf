@@ -1,0 +1,76 @@
+name: Archive Flux Checkpoints
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"   # every 6 hours, offset 15min from the LoRA crawler
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "new (recent only), backfill (descend windows), or heal (gap-fill swept range)"
+        required: false
+        type: choice
+        options: [new, backfill, heal]
+        default: backfill
+      base_models:
+        description: "Comma-separated Civitai base models"
+        required: false
+      max_files:
+        description: "Max files to archive this run"
+        required: false
+
+concurrency:
+  group: flux-checkpoints-archive
+  cancel-in-progress: false   # never interrupt an in-flight crawl
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # under GitHub's 6h ceiling
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+
+      # Checkpoints are 6-24GB each. The runner root disk is small (~21GB free);
+      # /mnt is the big temp volume (~74GB). Stage there so a single fp16 fits.
+      - name: Prepare big staging disk on /mnt
+        run: |
+          sudo mkdir -p /mnt/ckpt-staging
+          sudo chown "$USER" /mnt/ckpt-staging
+          df -h /mnt
+
+      - name: Run checkpoint crawler
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN_CIVITAI2026 }}
+          CIVITAI_API_KEY: ${{ secrets.CIVITAI_API_KEY }}
+          ARCHIVE_REPO: ${{ vars.CKPT_ARCHIVE_REPO || 'civitai2026/flux1-dev-checkpoints' }}
+          BASE_MODELS: ${{ github.event.inputs.base_models || vars.CKPT_BASE_MODELS || 'Flux.1 D' }}
+          MODEL_TYPE: Checkpoint
+          FILE_TYPES: ${{ vars.CKPT_FILE_TYPES || 'Model' }}
+          STORAGE_LIMIT_TB: ${{ vars.CKPT_STORAGE_LIMIT_TB || '8.5' }}
+          MAX_FILES_PER_RUN: ${{ github.event.inputs.max_files || vars.CKPT_MAX_FILES_PER_RUN || '0' }}
+          MAX_FILE_MB: ${{ vars.CKPT_MAX_FILE_MB || '0' }}
+          MODE: ${{ github.event.inputs.mode || 'backfill' }}
+          SINCE_DAYS: ${{ vars.CKPT_SINCE_DAYS || '3' }}
+          WINDOW_DAYS: ${{ vars.CKPT_WINDOW_DAYS || '30' }}
+          STAGING_DIR: /mnt/ckpt-staging
+        run: python checkpoint_crawler.py
+
+      - name: Backup manifest + skiplist + storage to GH
+        if: success()
+        env:
+          ARCHIVE_REPO: ${{ vars.CKPT_ARCHIVE_REPO || 'civitai2026/flux1-dev-checkpoints' }}
+        run: |
+          mkdir -p backups/checkpoints
+          base="https://huggingface.co/${ARCHIVE_REPO}/resolve/main"
+          curl -sLf "$base/manifest.json"       -o backups/checkpoints/manifest.json || true
+          curl -sLf "$base/skiplist.json"        -o backups/checkpoints/skiplist.json || true
+          curl -sLf "$base/storage_state.json"   -o backups/checkpoints/storage_state.json || true
+          curl -sLf "$base/backfill_state.json"  -o backups/checkpoints/backfill_state.json || true
+          git config user.email "actions@github.com"
+          git config user.name "gh-actions"
+          git add backups/checkpoints/
+          git diff --cached --quiet || git commit -m "Backup checkpoint state after run ${GITHUB_RUN_ID}"
+          git push || true

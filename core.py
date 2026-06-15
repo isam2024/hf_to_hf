@@ -61,6 +61,23 @@ def pick_primary_file(version):
     return files[0]
 
 
+def model_weight_files(version, file_types=("Model",)):
+    """Every file in a version whose Civitai `type` is in file_types.
+
+    A checkpoint version often ships several weight variants (full fp16, fp8,
+    pruned) all tagged type "Model"; this returns them all so the checkpoint
+    crawler can grab every variant. Files lacking a usable downloadUrl are
+    dropped. Pass file_types=None to take everything."""
+    out = []
+    for f in version.get("files", []):
+        if not f.get("downloadUrl"):
+            continue
+        if file_types is not None and f.get("type") not in file_types:
+            continue
+        out.append(f)
+    return out
+
+
 def parse_dt(s):
     """Parse a Civitai ISO timestamp (or cursor timestamp) to an aware UTC datetime."""
     if not s:
@@ -73,8 +90,13 @@ def parse_dt(s):
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_after=None, verbose=False):
-    """Yield (model, version) pairs for LoRAs matching any of the given base models.
+def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_after=None,
+                       verbose=False, types="LORA"):
+    """Yield (model, version) pairs of the given `types` matching any base model.
+
+    `types` is the Civitai model type ("LORA", "Checkpoint", ...). Defaults to
+    "LORA" so existing callers are unchanged; the checkpoint crawler passes
+    "Checkpoint".
 
     Pages through Civitai newest-first using cursor pagination. If published_after
     (an aware datetime) is given, only versions published at/after it are yielded,
@@ -101,7 +123,7 @@ def iter_lora_versions(base_models, page_limit=100, max_pages=5000, published_af
         pages = 0
         while pages < max_pages:
             params = {
-                "types": "LORA",
+                "types": types,
                 "sort": "Newest",
                 "limit": page_limit,
                 "baseModels": bm,
@@ -167,6 +189,24 @@ def repo_path_for(model, version, filename):
     pub = parse_dt(version.get("publishedAt"))
     date = pub.strftime("%Y-%m-%d") if pub else "undated"
     return f"{date}/{bm}/{mid}_{slug}/{vid}/{filename}"
+
+
+def load_repo_json(api, repo_id, path, default):
+    """Fetch and parse a JSON file from the repo. Returns `default` if the file
+    genuinely doesn't exist, but raises loud on LocalEntryNotFoundError — that
+    means the fetch failed (likely HF rate-limit) rather than "not there", and
+    treating it as missing would wipe accumulated state on the next commit."""
+    try:
+        local = api.hf_hub_download(repo_id=repo_id, filename=path, repo_type="model")
+        with open(local) as fh:
+            return json.load(fh)
+    except LocalEntryNotFoundError:
+        raise RuntimeError(
+            f"Could not fetch {path} (likely HF rate-limit). Aborting to avoid "
+            "overwriting accumulated state."
+        )
+    except (EntryNotFoundError, FileNotFoundError):
+        return default
 
 
 def load_manifest(api, repo_id):
@@ -274,22 +314,28 @@ def upload_folder_with_retry(api, repo_id, folder_path, commit_message, attempts
     raise RuntimeError(f"upload_folder failed after {attempts} attempts (rate limited)")
 
 
+def stage_file(staging_dir, model, version, fileobj):
+    """Download one specific file into staging_dir at its repo-relative path.
+    Returns (rel_path, size_bytes). Cleans up the partial file on failure."""
+    rel_path = repo_path_for(model, version, fileobj["name"])
+    dest = os.path.join(staging_dir, rel_path)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        got = stream_download(fileobj["downloadUrl"], dest, None, int(fileobj.get("sizeKB", 0) * 1024))
+    except Exception:
+        if os.path.exists(dest):
+            os.remove(dest)
+        raise
+    return rel_path, got
+
+
 def stage_download(staging_dir, model, version):
     """Download one version's primary file into staging_dir at its repo-relative path.
     Returns (rel_path, size_bytes) or None."""
     primary = pick_primary_file(version)
     if not primary:
         return None
-    rel_path = repo_path_for(model, version, primary["name"])
-    dest = os.path.join(staging_dir, rel_path)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    try:
-        got = stream_download(primary["downloadUrl"], dest, None, int(primary.get("sizeKB", 0) * 1024))
-    except Exception:
-        if os.path.exists(dest):
-            os.remove(dest)
-        raise
-    return rel_path, got
+    return stage_file(staging_dir, model, version, primary)
 
 
 def archive_version(api, repo_id, model, version, on_progress=None):
