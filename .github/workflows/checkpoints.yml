@@ -33,13 +33,17 @@ jobs:
           python-version: "3.11"
       - run: pip install -r requirements.txt
 
-      # Checkpoints are 6-24GB each. The runner root disk is small (~21GB free);
-      # /mnt is the big temp volume (~74GB). Stage there so a single fp16 fits.
-      - name: Prepare big staging disk on /mnt
+      # Checkpoints are 6-24GB each. On this runner image /mnt is the SMALL temp
+      # disk; the big volume is / (root). Reclaim ~20GB of preinstalled toolchains
+      # we don't use so a single fp16 fits, then stage on /. (We leave
+      # /opt/hostedtoolcache alone — it holds the Python set up above.)
+      - name: Free up disk on / and prepare staging
         run: |
-          sudo mkdir -p /mnt/ckpt-staging
-          sudo chown "$USER" /mnt/ckpt-staging
-          df -h /mnt
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/share/swift /usr/local/share/powershell || true
+          sudo docker image prune -af || true
+          mkdir -p "$RUNNER_TEMP/ckpt-staging"
+          df -h /
 
       - name: Run checkpoint crawler
         env:
@@ -55,7 +59,7 @@ jobs:
           MODE: ${{ github.event.inputs.mode || 'backfill' }}
           SINCE_DAYS: ${{ vars.CKPT_SINCE_DAYS || '3' }}
           WINDOW_DAYS: ${{ vars.CKPT_WINDOW_DAYS || '30' }}
-          STAGING_DIR: /mnt/ckpt-staging
+          STAGING_DIR: ${{ runner.temp }}/ckpt-staging
         run: python checkpoint_crawler.py
 
       - name: Backup manifest + skiplist + storage to GH

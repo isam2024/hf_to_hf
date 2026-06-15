@@ -65,9 +65,11 @@ the catalog newest-first in `WINDOW_DAYS` windows and persists a ceiling.
 
 Runs unattended via `.github/workflows/checkpoints.yml` (6-hourly cron). It uses
 its own secret `HF_TOKEN_CIVITAI2026` (write token for the secondary account)
-and reuses `CIVITAI_API_KEY`. The job stages on the runner's `/mnt` volume
-(~74 GB) so a single fp16 checkpoint fits. Run it manually from the Actions tab
-to pick `new`/`backfill`/`heal`.
+and reuses `CIVITAI_API_KEY`. The job reclaims ~20 GB of unused preinstalled
+toolchains so a single fp16 checkpoint fits the runner's ephemeral disk, and the
+crawler skips any file too big for the disk that remains (a dynamic free-space
+guard, `DISK_MARGIN_GB`). Run it manually from the Actions tab to pick
+`new`/`backfill`/`heal`.
 
 ```bash
 export HF_TOKEN=...                 # civitai2026 write token

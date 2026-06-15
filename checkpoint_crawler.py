@@ -58,7 +58,11 @@ MAX_FILES_PER_RUN = int(os.environ.get("MAX_FILES_PER_RUN", "0"))  # 0 = unlimit
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "0"))  # 0 = no per-file size cap
 STORAGE_LIMIT_TB = float(os.environ.get("STORAGE_LIMIT_TB", "8.5"))  # under the 8.6TB quota
 STORAGE_LIMIT_BYTES = int(STORAGE_LIMIT_TB * (1024 ** 4))
-STAGING_DIR = os.environ.get("STAGING_DIR") or None  # workflow points this at /mnt
+STAGING_DIR = os.environ.get("STAGING_DIR") or None  # workflow points this at freed-up disk
+# Local disk headroom to keep free when sizing a download against the runner's
+# ephemeral disk. A file that won't fit (plus this margin) is skipped, not
+# attempted — CI runners have far less disk than the 8.6TB HF quota.
+DISK_MARGIN_BYTES = int(float(os.environ.get("DISK_MARGIN_GB", "4")) * (1024 ** 3))
 
 MANIFEST_PATH = "manifest.json"
 SKIPLIST_PATH = "skiplist.json"
@@ -136,6 +140,17 @@ def archive_file(ctx, model, version, fileobj):
               f"would exceed {STORAGE_LIMIT_TB}TB cap; stopping.", flush=True)
         ctx.budget_full = True
         return "full"
+
+    # Local disk guard: the runner's ephemeral disk is tiny next to the HF quota.
+    # Skip (don't attempt) anything that won't fit alongside the margin, so a 24GB
+    # file on a 14GB disk fails fast and cheap instead of mid-download on ENOSPC.
+    if size:
+        free = shutil.disk_usage(STAGING_DIR or tempfile.gettempdir()).free
+        if size + DISK_MARGIN_BYTES > free:
+            print(f"  skip (too big for runner disk): {model.get('name')} f{fid} "
+                  f"({_gb(size):.1f}GB needs +margin, {_gb(free):.1f}GB free)", flush=True)
+            ctx.skipped_size += 1
+            return "skip"
 
     staging = tempfile.mkdtemp(prefix="ckpt_", dir=STAGING_DIR)
     try:
