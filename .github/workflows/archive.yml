@@ -26,6 +26,9 @@ jobs:
   archive:
     runs-on: ubuntu-latest
     timeout-minutes: 350      # under GitHub's 6h ceiling
+    permissions:
+      contents: write         # backup step pushes to this repo; also keeps the
+                              # 60-day scheduled-workflow inactivity timer reset
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,4 +60,4 @@ jobs:
           git config user.name "gh-actions"
           git add backups/
           git diff --cached --quiet || git commit -m "Backup manifest after run ${GITHUB_RUN_ID}"
-          git push || true
+          git push
