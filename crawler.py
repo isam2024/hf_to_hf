@@ -36,6 +36,9 @@ from core import (
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ARCHIVE_REPO = os.environ.get("ARCHIVE_REPO", "isam/civitai-lora-archive")
+# Earlier archive repos (full at HF's 20k-files-per-repo cap). Read-only: their manifest +
+# skiplist feed dedupe and their backfill ceiling seeds a fresh ARCHIVE_REPO; nothing is written to them.
+PRIOR_REPOS = [r.strip() for r in os.environ.get("PRIOR_REPOS", "").split(",") if r.strip()]
 BASE_MODELS = [b.strip() for b in os.environ.get("BASE_MODELS", "Flux.1 D").split(",") if b.strip()]
 MODE = os.environ.get("MODE", "new").strip().lower()
 SINCE_DAYS = float(os.environ.get("SINCE_DAYS", "2"))  # 'new' lookback window
@@ -150,11 +153,20 @@ def run_new(ctx, base_set):
     ctx.flush()
 
 
+def load_ceiling(api):
+    """Backfill ceiling of ARCHIVE_REPO, else of the newest prior repo that has one."""
+    for repo in [ARCHIVE_REPO] + PRIOR_REPOS[::-1]:
+        ceiling = load_backfill_ceiling(api, repo)
+        if ceiling:
+            return ceiling
+    return None
+
+
 def run_heal(ctx, base_set):
     """Single newest-first pass from now back to the backfill ceiling.
     Dedupe (manifest + skiplist) keeps it cheap — only true gaps download.
     Catches versions silently dropped on transient errors during normal runs."""
-    floor = load_backfill_ceiling(ctx.api, ARCHIVE_REPO) or (
+    floor = load_ceiling(ctx.api) or (
         datetime.now(timezone.utc) - timedelta(days=365)
     )
     print(f"Mode: heal (newest -> {floor:%Y-%m-%d %H:%M}Z, scanning for gaps in manifest+skiplist)")
@@ -167,7 +179,7 @@ def run_heal(ctx, base_set):
 
 
 def run_backfill(ctx, base_set):
-    ceiling = load_backfill_ceiling(ctx.api, ARCHIVE_REPO) or datetime.now(timezone.utc)
+    ceiling = load_ceiling(ctx.api) or datetime.now(timezone.utc)
     # Track the deepest publishedAt we've actually examined (called process_version on).
     # The window-top `ceiling` only advances on clean window completion, so it lags reality
     # badly when a run is killed by timeout. `deepest` is monotonic-descending and reflects
@@ -250,6 +262,12 @@ def main():
     archived = load_manifest(api, ARCHIVE_REPO)
     skiplist = load_skiplist(api, ARCHIVE_REPO)
     print(f"Manifest: {len(archived)} archived  |  skiplist: {len(skiplist)} permanent failures")
+    for repo in PRIOR_REPOS:
+        prior_archived = load_manifest(api, repo)
+        prior_skip = load_skiplist(api, repo)
+        print(f"Prior {repo}: {len(prior_archived)} archived  |  skiplist: {len(prior_skip)}")
+        archived |= prior_archived
+        skiplist |= prior_skip
 
     ctx = Ctx(api, archived, skiplist)
     try:
